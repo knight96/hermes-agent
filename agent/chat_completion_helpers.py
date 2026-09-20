@@ -585,7 +585,13 @@ def _touch_stale_kill_activity(agent, elapsed: float) -> None:
 def _check_stale_giveup(agent) -> None:
     """Raise immediately when the consecutive-stale streak is past the
     give-up threshold — no network attempt, no stale-timeout wait."""
-    _giveup = env_int("HERMES_STREAM_STALE_GIVEUP", 5)
+    # LOCAL PATCH (fork): default raised 5 -> 30. At a short stream threshold (e.g. 60s) a
+    # *transient* relay outage produced 5 quick kills and aborted a long unattended task,
+    # even though the provider recovered minutes later. The breaker's job is to stop a
+    # permanently dead endpoint; ~30 kills is ~30 min of continuous stalling at 60s.
+    # Set HERMES_STREAM_STALE_GIVEUP=0 to disable the breaker entirely.
+    # See LOCAL-PATCHES.md.
+    _giveup = env_int("HERMES_STREAM_STALE_GIVEUP", 30)
     _streak = _stale_streak(agent)
     if _giveup > 0 and _streak >= _giveup:
         raise RuntimeError(
