@@ -573,7 +573,12 @@ def _touch_stale_kill_activity(agent, elapsed: float) -> None:
 def _check_stale_giveup(agent) -> None:
     """Raise immediately when the consecutive-stale streak is past the
     give-up threshold — no network attempt, no stale-timeout wait."""
-    _giveup = env_int("HERMES_STREAM_STALE_GIVEUP", 5)
+    # Default raised 5 -> 30: at a short stream threshold (e.g. 60s) a *transient* relay
+    # outage produced 5 quick kills and aborted a long unattended task, even though the
+    # provider recovered minutes later. The breaker's job is to stop a permanently dead
+    # endpoint; ~30 kills is ~30 min of continuous stalling at a 60s threshold.
+    # Set HERMES_STREAM_STALE_GIVEUP=0 to disable the breaker entirely.
+    _giveup = env_int("HERMES_STREAM_STALE_GIVEUP", 30)
     _streak = _stale_streak(agent)
     if _giveup > 0 and _streak >= _giveup:
         raise RuntimeError(
@@ -3240,6 +3245,12 @@ class _StreamingCall(StreamingWaitMonitor):
         crashed endpoint forever. Cloud values scale with context size and are
         floored for known reasoning models (else BrokenPipeError from the gateway)."""
         base = _configured_stale_base(self.agent)
+        # An explicit user setting (per-model/per-provider ``stale_timeout_seconds`` or
+        # HERMES_STREAM_STALE_TIMEOUT) wins outright — this mirrors the non-stream resolver, so a
+        # deliberately short patience is not silently raised by the reasoning-model floor or by
+        # the context scaling below. Without this, a configured value was only ever a lower bound.
+        explicit = (get_provider_stale_timeout(self.agent.provider, self.agent.model) is not None
+                    or os.getenv("HERMES_STREAM_STALE_TIMEOUT") is not None)
         if base == 180.0 and self.agent.base_url and is_local_endpoint(self.agent.base_url):
             _local_default = 900.0
             with contextlib.suppress(Exception):
@@ -3252,6 +3263,11 @@ class _StreamingCall(StreamingWaitMonitor):
             self._stream_stale_timeout = env_float("HERMES_LOCAL_STREAM_STALE_TIMEOUT", _local_default)
             logger.debug("Local provider detected (%s) — stale stream timeout set to %.0fs",
                 self.agent.base_url, self._stream_stale_timeout)
+            return
+        if explicit:
+            self._stream_stale_timeout = float(base)
+            logger.debug("Explicit stream stale timeout %.0fs (provider=%s model=%s)",
+                self._stream_stale_timeout, self.agent.provider, self.agent.model)
             return
         self._stream_stale_timeout = _cloud_stale_timeout(base, self.api_kwargs)
 
